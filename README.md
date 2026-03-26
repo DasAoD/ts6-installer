@@ -89,6 +89,8 @@ tail -f /var/log/ts6ctl.log
 - **ServerQuery** ist in der Beta noch nicht vollständig verfügbar
 - Für Parallelbetrieb mit TS3: andere Ports wählen (z. B. `9988/UDP`, `30034/TCP`)
 
-## Lizenz
+---
 
-MIT
+## License
+
+[MIT](LICENSE)
