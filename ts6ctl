@@ -7,9 +7,9 @@
 set -euo pipefail
 
 # ── Konstanten ────────────────────────────────────────────────
-SCRIPT_VERSION="1.0.1"
+SCRIPT_VERSION="1.1.0"
 GITHUB_API="https://api.github.com/repos/teamspeak/teamspeak6-server/releases/latest"
-CONF_FILE="/etc/ts6ctl.conf"
+CONF_FILE="/var/www/ts6admin/config/ts6ctl.conf"
 CRON_FILE="/etc/cron.d/ts6ctl"
 LOG_FILE="/var/log/ts6ctl.log"
 SCRIPT_PATH="$(realpath "$0")"
@@ -30,27 +30,43 @@ error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 section() { echo -e "\n${BLUE}${BOLD}=== $* ===${NC}"; }
 die()     { error "$*"; exit 1; }
 
-# ── Konfiguration laden / speichern ───────────────────────────
+# ── Konfiguration laden ───────────────────────────────────────
 load_config() {
     if [[ -f "$CONF_FILE" ]]; then
         source "$CONF_FILE"
     fi
 }
 
+# ── Einzelnen Key in Config setzen oder ergänzen ─────────────
+# Bestehende Keys (z.B. TS6_QUERY_API_KEY) werden nicht angefasst
+_set_key() {
+    local key="$1" val="$2"
+    if grep -q "^${key}=" "$CONF_FILE" 2>/dev/null; then
+        sed -i "s|^${key}=.*|${key}=\"${val}\"|" "$CONF_FILE"
+    else
+        echo "${key}=\"${val}\"" >> "$CONF_FILE"
+    fi
+}
+
 save_config() {
-    cat > "$CONF_FILE" <<EOF
-# ts6ctl Konfiguration — generiert am $(date '+%Y-%m-%d %H:%M')
-TS6_INSTALL_DIR="${TS6_INSTALL_DIR:-}"
-TS6_USER="${TS6_USER:-}"
-TS6_SERVICE="${TS6_SERVICE:-}"
-TS6_VOICE_PORT="${TS6_VOICE_PORT:-}"
-TS6_FILETRANSFER_PORT="${TS6_FILETRANSFER_PORT:-}"
-TS6_QUERY_HTTP_PORT="${TS6_QUERY_HTTP_PORT:-}"
-TS6_MAIL_TO="${TS6_MAIL_TO:-}"
-TS6_MAIL_FROM="${TS6_MAIL_FROM:-}"
-TS6_INSTALLED_VERSION="${TS6_INSTALLED_VERSION:-}"
-EOF
-    chmod 600 "$CONF_FILE"
+    # Datei anlegen falls nicht vorhanden
+    if [[ ! -f "$CONF_FILE" ]]; then
+        mkdir -p "$(dirname "$CONF_FILE")"
+        touch "$CONF_FILE"
+    fi
+    chmod 640 "$CONF_FILE"
+    chown root:www-data "$CONF_FILE" 2>/dev/null || true
+
+    _set_key TS6_INSTALL_DIR       "${TS6_INSTALL_DIR:-}"
+    _set_key TS6_USER              "${TS6_USER:-}"
+    _set_key TS6_SERVICE           "${TS6_SERVICE:-}"
+    _set_key TS6_VOICE_PORT        "${TS6_VOICE_PORT:-}"
+    _set_key TS6_FILETRANSFER_PORT "${TS6_FILETRANSFER_PORT:-}"
+    _set_key TS6_QUERY_HTTP_PORT   "${TS6_QUERY_HTTP_PORT:-}"
+    _set_key TS6_MAIL_TO           "${TS6_MAIL_TO:-}"
+    _set_key TS6_MAIL_FROM         "${TS6_MAIL_FROM:-}"
+    _set_key TS6_INSTALLED_VERSION "${TS6_INSTALLED_VERSION:-}"
+
     info "Konfiguration gespeichert: $CONF_FILE"
 }
 
@@ -82,12 +98,12 @@ get_download_url() {
     local json="$1"
     echo "$json" | jq -r \
         '.assets | map(select(
-            (.name | contains("linux-amd64") or contains("linux_amd64")) and
-            ((.name | endswith(".tar.bz2")) or (.name | endswith(".tar.gz")) or (.name | endswith(".tar.xz")))
+            (.name | (contains("linux-amd64") or contains("linux_amd64"))) and
+            (.name | (endswith(".tar.bz2") or endswith(".tar.gz") or endswith(".tar.xz")))
         ))[0].browser_download_url'
 }
 
-# ── Archiv entpacken (bz2 oder gz) ───────────────────────────
+# ── Archiv entpacken — Format wird automatisch erkannt ───────
 tar_extract() {
     local file="$1" dest="$2"
     tar xaf "$file" -C "$dest"
@@ -133,25 +149,18 @@ cmd_install() {
 
     read -rp "  Installationsverzeichnis       [${TS6_INSTALL_DIR}]: " i
     TS6_INSTALL_DIR="${i:-$TS6_INSTALL_DIR}"
-
     read -rp "  Service-Benutzer (System-User) [${TS6_USER}]: " i
     TS6_USER="${i:-$TS6_USER}"
-
     read -rp "  Systemd-Service-Name           [${TS6_SERVICE}]: " i
     TS6_SERVICE="${i:-$TS6_SERVICE}"
-
     read -rp "  Voice-Port (UDP)               [${TS6_VOICE_PORT}]: " i
     TS6_VOICE_PORT="${i:-$TS6_VOICE_PORT}"
-
     read -rp "  File-Transfer-Port (TCP)       [${TS6_FILETRANSFER_PORT}]: " i
     TS6_FILETRANSFER_PORT="${i:-$TS6_FILETRANSFER_PORT}"
-
     read -rp "  HTTP-Query-Port (0=deaktiviert)[${TS6_QUERY_HTTP_PORT}]: " i
     TS6_QUERY_HTTP_PORT="${i:-$TS6_QUERY_HTTP_PORT}"
-
-    read -rp "  E-Mail fuer Update-Benachrichtigung (leer=deaktiviert): " i
+    read -rp "  E-Mail für Update-Benachrichtigung (leer=deaktiviert): " i
     TS6_MAIL_TO="${i:-$TS6_MAIL_TO}"
-
     read -rp "  Absender-E-Mail                [${TS6_MAIL_FROM:-ts6ctl@$(hostname -f)}]: " i
     TS6_MAIL_FROM="${i:-${TS6_MAIL_FROM:-ts6ctl@$(hostname -f)}}"
 
@@ -194,6 +203,8 @@ cmd_install() {
     curl -L --progress-bar -o "$tmpfile" "$download_url"
     tar_extract "$tmpfile" "$TS6_INSTALL_DIR"
     rm -f "$tmpfile"
+    chmod +x "$TS6_INSTALL_DIR/tsserver"
+    chown -R "$TS6_USER":"$TS6_USER" "$TS6_INSTALL_DIR/"
     info "Fertig entpackt nach: $TS6_INSTALL_DIR"
 
     section "Server-Konfiguration schreiben"
@@ -220,7 +231,7 @@ cmd_install() {
         } > "$yaml_file"
         info "tsserver.yaml angelegt."
     else
-        warn "tsserver.yaml existiert bereits — wird nicht ueberschrieben."
+        warn "tsserver.yaml existiert bereits — wird nicht überschrieben."
     fi
 
     chown -R "$TS6_USER":"$TS6_USER" "$TS6_INSTALL_DIR"
@@ -252,12 +263,12 @@ SERVICE
     systemctl daemon-reload
     systemctl enable "$TS6_SERVICE"
     systemctl start "$TS6_SERVICE"
-    info "Service '$TS6_SERVICE' gestartet und fuer Autostart aktiviert."
+    info "Service '$TS6_SERVICE' gestartet und für Autostart aktiviert."
 
     section "Update-Check (Cron) einrichten"
     echo "0 8 * * * root ${SCRIPT_PATH} check-update >> ${LOG_FILE} 2>&1" > "$CRON_FILE"
     chmod 644 "$CRON_FILE"
-    info "Cron-Job: taeglich 08:00 Uhr → $CRON_FILE"
+    info "Cron-Job: täglich 08:00 Uhr → $CRON_FILE"
 
     TS6_INSTALLED_VERSION="$latest_version"
     save_config
@@ -265,9 +276,9 @@ SERVICE
     show_admin_token "$TS6_SERVICE"
 
     section "Installation abgeschlossen!"
-    echo -e "  Server laeuft auf Port ${CYAN}${TS6_VOICE_PORT}/UDP${NC}"
+    echo -e "  Server läuft auf Port ${CYAN}${TS6_VOICE_PORT}/UDP${NC}"
     echo ""
-    echo -e "  ${BOLD}Nuetzliche Befehle:${NC}"
+    echo -e "  ${BOLD}Nützliche Befehle:${NC}"
     echo "    systemctl status $TS6_SERVICE"
     echo "    journalctl -fu $TS6_SERVICE"
     echo "    $(basename "$0") status"
@@ -277,32 +288,38 @@ SERVICE
 
 # ── UPDATE ────────────────────────────────────────────────────
 cmd_update() {
-    [[ $EUID -eq 0 ]] || die "update muss als root ausgefuehrt werden."
+    [[ $EUID -eq 0 ]] || die "update muss als root ausgeführt werden."
+    local yes_flag="${1:-}"
     load_config
-    [[ -n "${TS6_INSTALL_DIR:-}" ]] || die "Keine Konfiguration gefunden. Erst 'install' ausfuehren."
+    [[ -n "${TS6_INSTALL_DIR:-}" ]] || die "Keine Konfiguration gefunden. Erst 'install' ausführen."
     check_deps
 
     section "TeamSpeak 6 Server — Update"
 
     local json download_url latest_version
-    info "Pruefe GitHub auf neueste Version..."
+    info "Prüfe GitHub auf neueste Version..."
     json=$(get_latest_release_json)
     latest_version=$(echo "$json" | jq -r '.tag_name')
     download_url=$(get_download_url "$json")
 
     info "Installiert : ${TS6_INSTALLED_VERSION:-unbekannt}"
-    info "Verfuegbar  : $latest_version"
+    info "Verfügbar   : $latest_version"
 
     if [[ "$latest_version" == "${TS6_INSTALLED_VERSION:-}" ]]; then
-        info "Bereits auf dem neuesten Stand. Kein Update noetig."
+        info "Bereits auf dem neuesten Stand. Kein Update nötig."
         exit 0
     fi
 
     [[ "$download_url" == "null" || -z "$download_url" ]] && die "Kein linux_amd64-Asset gefunden."
 
-    echo ""
-    read -rp "Update auf $latest_version durchfuehren? [j/N]: " yn
-    [[ "$yn" =~ ^[jJyY]$ ]] || { info "Update abgebrochen."; exit 0; }
+    # Interaktive Bestätigung — außer bei --yes
+    if [[ "$yes_flag" != "--yes" ]]; then
+        echo ""
+        read -rp "Update auf $latest_version durchführen? [j/N]: " yn
+        [[ "$yn" =~ ^[jJyY]$ ]] || { info "Update abgebrochen."; exit 0; }
+    else
+        info "Non-interaktiver Modus (--yes): Update wird automatisch durchgeführt."
+    fi
 
     if cp "$TS6_INSTALL_DIR/tsserver" "$TS6_INSTALL_DIR/tsserver.bak" 2>/dev/null; then
         info "Backup: ${TS6_INSTALL_DIR}/tsserver.bak"
@@ -316,11 +333,12 @@ cmd_update() {
     tmpdir=$(mktemp -d /tmp/ts6-extract-XXXXXX)
 
     info "Lade $latest_version herunter..."
-    curl -L --progress-bar -o "$tmpfile" "$download_url"
+    local curl_progress="--progress-bar"
+    [[ "$yes_flag" == "--yes" ]] && curl_progress="--silent"
+    curl -L $curl_progress -o "$tmpfile" "$download_url"
     tar_extract "$tmpfile" "$tmpdir"
 
-    # Alle Dateien aus dem Archiv synchronisieren (Binary, Libraries, Docs)
-    # Konfiguration, DB und Laufzeitdaten bleiben erhalten
+    # Alle Dateien synchronisieren — Konfiguration, DB und Laufzeitdaten bleiben erhalten
     rsync -a \
         --exclude="tsserver.yaml" \
         --exclude="*.sqlitedb" \
@@ -346,7 +364,7 @@ cmd_update() {
     echo "    journalctl -fu $TS6_SERVICE"
 }
 
-# ── CHECK-UPDATE (fuer Cron) ──────────────────────────────────
+# ── CHECK-UPDATE (für Cron) ───────────────────────────────────
 cmd_check_update() {
     load_config
     check_deps
@@ -365,13 +383,13 @@ cmd_check_update() {
         exit 0
     fi
 
-    echo "${timestamp} [UPDATE] Neue Version verfuegbar: $latest_version (installiert: $installed_version)"
+    echo "${timestamp} [UPDATE] Neue Version verfügbar: $latest_version (installiert: $installed_version)"
 
     if [[ -n "${TS6_MAIL_TO:-}" ]]; then
-        local subject="[ts6ctl] Update verfuegbar: $latest_version"
+        local subject="[ts6ctl] Update verfügbar: $latest_version"
         local body
         body=$(cat <<MAIL
-TeamSpeak 6 Server — Update verfuegbar
+TeamSpeak 6 Server — Update verfügbar
 
   Installierte Version : ${installed_version}
   Neue Version         : ${latest_version}
@@ -380,7 +398,7 @@ TeamSpeak 6 Server — Update verfuegbar
   Installationsverz.   : ${TS6_INSTALL_DIR:-unbekannt}
   Service              : ${TS6_SERVICE:-teamspeak6}
 
-Update durchfuehren:
+Update durchführen:
   ts6ctl update
 
 Release-Notes:
@@ -430,24 +448,28 @@ cmd_help() {
 ${BOLD}ts6ctl v${SCRIPT_VERSION}${NC} — TeamSpeak 6 Server Control
 
 ${BOLD}Verwendung:${NC}
-  $(basename "$0") <befehl>
+  $(basename "$0") <befehl> [optionen]
 
 ${BOLD}Befehle:${NC}
-  ${GREEN}install${NC}       Interaktive Erstinstallation des TS6-Servers
-  ${GREEN}update${NC}        Server auf neueste Version aktualisieren
-  ${GREEN}check-update${NC}  Version pruefen, ggf. E-Mail senden (fuer Cron)
-  ${GREEN}status${NC}        Installations- und Service-Status anzeigen
-  ${GREEN}help${NC}          Diese Hilfe
+  ${GREEN}install${NC}           Interaktive Erstinstallation des TS6-Servers
+  ${GREEN}update${NC} [--yes]    Server auf neueste Version aktualisieren
+                    --yes: ohne Rückfrage (für WebUI/Automatisierung)
+  ${GREEN}check-update${NC}      Version prüfen, ggf. E-Mail senden (für Cron)
+  ${GREEN}status${NC}            Installations- und Service-Status anzeigen
+  ${GREEN}help${NC}              Diese Hilfe
 
-${BOLD}Dateien:${NC}
-  Konfiguration : $CONF_FILE
-  Cron-Job      : $CRON_FILE
-  Log-Datei     : $LOG_FILE
+${BOLD}Konfiguration:${NC}
+  $CONF_FILE
+
+${BOLD}Weitere Dateien:${NC}
+  Cron-Job  : $CRON_FILE
+  Log-Datei : $LOG_FILE
 
 ${BOLD}Beispiele:${NC}
   $(basename "$0") install
   $(basename "$0") status
   $(basename "$0") update
+  $(basename "$0") update --yes   # nicht-interaktiv (WebUI)
   $(basename "$0") check-update
   journalctl -fu teamspeak6
 
@@ -457,7 +479,7 @@ HELP
 # ── Einstiegspunkt ────────────────────────────────────────────
 case "${1:-help}" in
     install)        cmd_install ;;
-    update)         cmd_update ;;
+    update)         cmd_update "${2:-}" ;;
     check-update)   cmd_check_update ;;
     status)         cmd_status ;;
     help|--help|-h) cmd_help ;;
